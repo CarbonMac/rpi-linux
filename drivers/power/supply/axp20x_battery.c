@@ -120,6 +120,9 @@ struct axp20x_batt_ps {
 	unsigned int max_ccc;
 	const struct axp_data	*data;
 	bool ts_disable;
+	int energy_full_design;
+	int current_now;
+	int voltage_now;
 };
 
 static int axp20x_battery_get_max_voltage(struct axp20x_batt_ps *axp20x_batt,
@@ -369,6 +372,7 @@ static int axp20x_battery_get_prop(struct power_supply *psy,
 		if (ret)
 			return ret;
 
+		axp20x_batt->current_now = val->intval;
 		break;
 
 	case POWER_SUPPLY_PROP_CAPACITY:
@@ -416,6 +420,47 @@ static int axp20x_battery_get_prop(struct power_supply *psy,
 		if (ret)
 			return ret;
 
+		axp20x_batt->voltage_now = val->intval;
+		break;
+
+	case POWER_SUPPLY_PROP_ENERGY_FULL:
+	case POWER_SUPPLY_PROP_ENERGY_NOW:
+	case POWER_SUPPLY_PROP_ENERGY_FULL_DESIGN:
+		ret = regmap_read(axp20x_batt->regmap, AXP20X_PWR_OP_MODE, &reg);
+		if (ret)
+			return ret;
+
+		if (!(reg & AXP20X_PWR_OP_BATT_PRESENT)) {
+			val->intval = 0;
+			return 0;
+		}
+
+		if (psp == POWER_SUPPLY_PROP_ENERGY_FULL) {
+			val->intval = axp20x_batt->energy_full_design;
+			return 0;
+		}
+
+		if (psp == POWER_SUPPLY_PROP_ENERGY_FULL_DESIGN) {
+			val->intval = axp20x_batt->energy_full_design;
+			return 0;
+		}
+
+		ret = regmap_read(axp20x_batt->regmap, AXP20X_FG_RES, &reg);
+		if (ret)
+			return ret;
+
+		if (axp20x_batt->data->has_fg_valid && !(reg & AXP22X_FG_VALID))
+			return -EINVAL;
+
+		val1 = reg & AXP209_FG_PERCENT;
+		val1 = max(min(val1, 100), 0);
+		val->intval = (val1 * ((long long int)axp20x_batt->energy_full_design)) / 100;
+		break;
+
+	case POWER_SUPPLY_PROP_POWER_NOW:
+		val->intval = (axp20x_batt->voltage_now / 10000) *
+			      axp20x_batt->current_now;
+		val->intval = val->intval / 100;
 		break;
 
 	default:
@@ -850,6 +895,10 @@ static enum power_supply_property axp20x_battery_props[] = {
 	POWER_SUPPLY_PROP_VOLTAGE_MAX,
 	POWER_SUPPLY_PROP_VOLTAGE_MIN,
 	POWER_SUPPLY_PROP_CAPACITY,
+	POWER_SUPPLY_PROP_ENERGY_FULL,
+	POWER_SUPPLY_PROP_ENERGY_NOW,
+	POWER_SUPPLY_PROP_ENERGY_FULL_DESIGN,
+	POWER_SUPPLY_PROP_POWER_NOW,
 };
 
 static enum power_supply_property axp717_battery_props[] = {
@@ -961,6 +1010,11 @@ static void axp209_set_battery_info(struct platform_device *pdev,
 {
 	int vmin = info->voltage_min_design_uv;
 	int ccc = info->constant_charge_current_max_ua;
+
+	if (info->energy_full_design_uwh > 0)
+		axp_batt->energy_full_design = info->energy_full_design_uwh;
+	else if (info->charge_full_design_uah > 0)
+		axp_batt->energy_full_design = info->charge_full_design_uah;
 
 	if (vmin > 0 && axp20x_set_voltage_min_design(axp_batt, vmin))
 		dev_err(&pdev->dev,
